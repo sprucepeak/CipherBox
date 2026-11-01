@@ -14,7 +14,7 @@ const (
 	AppVersion = "v1.0.1"
 	AppName    = "CipherBox"
 	VolumeExt  = ".sbx" // 加密卷文件扩展名
-	MagicPCO2  = "PCO2" // 密文卷魔数标识
+	MagicSBX1  = "SBX1" // 密文卷魔数标识 (CipherBox v1)
 
 	// 存储单位常量
 	KiB = 1 << 10

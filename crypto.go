@@ -36,31 +36,25 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
-// 判断路径是否为支持的加密卷格式（优先匹配 .sbx，向前兼容 .pcv）
+// 判断路径是否为支持的加密卷格式（.sbx）
 func isVolumeExt(path string) bool {
-	return strings.HasSuffix(path, VolumeExt) || strings.HasSuffix(path, ".pcv")
+	return strings.HasSuffix(path, VolumeExt)
 }
 
-// 检查是否为加密分卷（如 .sbx.0 或 .pcv.0）
+// 检查是否为加密分卷（如 .sbx.0）
 func isSplitVolume(path string) (bool, string) {
 	ext := filepath.Ext(path)
 	if len(ext) > 1 && ext[1] >= '0' && ext[1] <= '9' {
 		if strings.Contains(path, VolumeExt+".") {
 			return true, VolumeExt
 		}
-		if strings.Contains(path, ".pcv.") {
-			return true, ".pcv"
-		}
 	}
 	return false, ""
 }
 
-// 去除加密卷扩展名（支持 .sbx 和 .pcv）
+// 去除加密卷扩展名（.sbx）
 func trimVolumeExt(path string) string {
-	if strings.HasSuffix(path, VolumeExt) {
-		return strings.TrimSuffix(path, VolumeExt)
-	}
-	return strings.TrimSuffix(path, ".pcv")
+	return strings.TrimSuffix(path, VolumeExt)
 }
 
 // GUI hooks（由 ui.go 注入）
@@ -361,7 +355,7 @@ func onDrop(names []string) {
 					fail("无法读取文件头")
 					return
 				}
-				if string(magic) != "PCO2" {
+				if string(magic) != MagicSBX1 {
 					deniability = true
 					mainStatus = "无法读取头部，假定该卷为可否认卷"
 					fin.Close()
@@ -378,6 +372,11 @@ func onDrop(names []string) {
 					if err := binary.Read(fin, binary.BigEndian, &cLen); err != nil {
 						fin.Close()
 						fail("读取备注长度失败")
+						return
+					}
+					if cLen > 4096 {
+						fin.Close()
+						fail("备注长度超出安全上限")
 						return
 					}
 					if err := binary.Read(fin, binary.BigEndian, &flags); err != nil {
@@ -773,13 +772,13 @@ func work() {
 		check(fin.Close())
 		check(fout.Close())
 
-		// Check if the PCO2 magic can be read from the decrypted volume
+		// Check if the MagicSBX1 magic can be read from the decrypted volume
 		fin, err = os.Open(inputFile)
 		check(err)
 		magic := make([]byte, 4)
 		n, err := fin.Read(magic)
 		check(fin.Close())
-		if err != nil || n != 4 || string(magic) != "PCO2" {
+		if err != nil || n != 4 || string(magic) != MagicSBX1 {
 			os.Remove(inputFile)
 			inputFile = strings.TrimSuffix(inputFile, ".tmp")
 			broken(nil, nil, "密码错误，或该文件不是卷", true)
@@ -864,7 +863,7 @@ func work() {
 		headerBuf[2] = flagByte
 		copy(headerBuf[3:], []byte(comments))
 
-		must(fout.Write([]byte("PCO2")))
+		must(fout.Write([]byte(MagicSBX1)))
 		must(fout.Write(salt))
 		must(fout.Write(headerBuf))
 	} else { // Decrypting, read values from file and decode
@@ -872,7 +871,7 @@ func work() {
 		update()
 
 		magic := make([]byte, 4)
-		if _, err := io.ReadFull(fin, magic); err != nil || string(magic) != "PCO2" {
+		if _, err := io.ReadFull(fin, magic); err != nil || string(magic) != MagicSBX1 {
 			broken(fin, nil, "无效的文件格式或文件头已损坏", true)
 			return
 		}
@@ -886,6 +885,10 @@ func work() {
 		var flagByte byte
 		if err := binary.Read(fin, binary.BigEndian, &cLen); err != nil {
 			broken(fin, nil, "读取备注长度失败", true)
+			return
+		}
+		if cLen > 4096 {
+			broken(fin, nil, "备注长度超出安全上限", true)
 			return
 		}
 		if err := binary.Read(fin, binary.BigEndian, &flagByte); err != nil {
@@ -1116,6 +1119,11 @@ func work() {
 					break
 				}
 				broken(fin, fout, "读取密文块长度失败", false)
+				return
+			}
+			// 防御超大内存分配 DoS：限制密文块大小（单块最大 1MiB + 额外开销，上限 2MiB）
+			if ctLen == 0 || ctLen > 2*MiB {
+				broken(fin, fout, "密文块长度异常或文件已损坏", false)
 				return
 			}
 
@@ -1407,9 +1415,10 @@ func work() {
 	// Delete temporary files used during encryption and decryption
 	if recombine || len(allFiles) > 1 || len(onlyFolders) > 0 || compress {
 		_ = os.Remove(inputFile)
-		if deniability {
-			_ = os.Remove(strings.TrimSuffix(inputFile, ".tmp"))
-		}
+	}
+	// 在开启可否认性解密时，inputFile 对应生成的解密临时中间件（.tmp），必须在解密完成后清除该临时文件
+	if mode == "decrypt" && deniability && strings.HasSuffix(inputFile, ".tmp") {
+		_ = os.Remove(inputFile)
 	}
 
 	// Delete the input files if the user chooses
@@ -1429,10 +1438,11 @@ func work() {
 					i++
 				}
 			} else {
-				_ = os.Remove(inputFile)
-				if deniability {
-					_ = os.Remove(strings.TrimSuffix(inputFile, ".tmp"))
+				targetToDelete := inputFile
+				if deniability && strings.HasSuffix(inputFile, ".tmp") {
+					targetToDelete = strings.TrimSuffix(inputFile, ".tmp")
 				}
+				_ = os.Remove(targetToDelete)
 			}
 		} else {
 			for _, i := range onlyFiles {
@@ -1442,9 +1452,6 @@ func work() {
 				_ = os.RemoveAll(i)
 			}
 		}
-	}
-	if mode == "decrypt" && deniability {
-		_ = os.Remove(inputFile)
 	}
 
 	if mode == "decrypt" && !kept && autoUnzip {
@@ -1603,8 +1610,12 @@ func genPassword() string {
 		chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz1234567890"
 	}
 	tmp := make([]byte, int(passgenLength))
+	maxLen := big.NewInt(int64(len(chars)))
 	for i := 0; i < int(passgenLength); i++ {
-		j, _ := rand.Int(rand.Reader, big.NewInt(int64(len(chars))))
+		j, err := rand.Int(rand.Reader, maxLen)
+		if err != nil {
+			panic(fmt.Errorf("安全随机数发生器故障: %w", err))
+		}
 		tmp[i] = chars[j.Int64()]
 	}
 	if passgenCopy {
@@ -1689,6 +1700,11 @@ func unpackArchive(zipPath string) error {
 		// 防御 Zip Slip 目录穿越：解压路径必须包含在 cleanExtractDir 之下
 		if !strings.HasPrefix(cleanOutPath, cleanExtractDir+string(os.PathSeparator)) && cleanOutPath != cleanExtractDir {
 			return errors.New("潜在的恶意 zip 项路径（检测到目录穿越）")
+		}
+
+		// 防御符号链接攻击：禁止解压符号链接
+		if f.Mode()&os.ModeSymlink != 0 {
+			return errors.New("拒绝解压包含符号链接的潜在不安全压缩项")
 		}
 
 		if f.FileInfo().IsDir() {

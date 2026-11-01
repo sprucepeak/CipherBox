@@ -441,7 +441,7 @@ func chooseOutput() {
 			file += filepath.Ext(inputFile) + VolumeExt
 		}
 	} else {
-		if strings.HasSuffix(inputFile, ".zip"+VolumeExt) || strings.HasSuffix(inputFile, ".zip.pcv") {
+		if strings.HasSuffix(inputFile, ".zip"+VolumeExt) {
 			file += ".zip"
 		} else {
 			tmp := trimVolumeExt(filepath.Base(inputFile))
@@ -684,7 +684,7 @@ func view(c *ui.Context) {
 				})
 				ui.Row(c).Gap(24).Children(func() {
 					ui.Box(c).Grow(1).Children(func() {
-						isZipVolume := strings.HasSuffix(inputFile, ".zip"+VolumeExt) || strings.HasSuffix(inputFile, ".zip.pcv")
+						isZipVolume := strings.HasSuffix(inputFile, ".zip"+VolumeExt)
 						unzipCb := ui.Checkbox(c, &autoUnzip, "自动解压").Disabled(advancedDisabled || !isZipVolume).OnChange(func() {
 							if !autoUnzip {
 								sameLevel = false
