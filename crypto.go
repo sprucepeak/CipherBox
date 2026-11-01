@@ -86,6 +86,13 @@ func fail(msg string) {
 	update()
 }
 
+// zeroBytes 防御性内存清零，避免编译器死代码消除优化
+func zeroBytes(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
+}
+
 type compressorProgress struct {
 	io.Reader
 }
@@ -112,9 +119,9 @@ type encryptedZipWriter struct {
 }
 
 func (ezw *encryptedZipWriter) Write(data []byte) (n int, err error) {
-	dst := make([]byte, len(data))
-	ezw._stream.XORKeyStream(dst, data)
-	return ezw._w.Write(dst)
+	// 原地异或加密，避免每分块频繁进行内存分配
+	ezw._stream.XORKeyStream(data, data)
+	return ezw._w.Write(data)
 }
 
 type encryptedZipReader struct {
@@ -123,14 +130,10 @@ type encryptedZipReader struct {
 }
 
 func (ezr *encryptedZipReader) Read(data []byte) (n int, err error) {
-	src := make([]byte, len(data))
-	n, err = ezr._r.Read(src)
+	n, err = ezr._r.Read(data)
 	if err == nil && n > 0 {
-		dst := make([]byte, n)
-		ezr._stream.XORKeyStream(dst, src[:n])
-		if copy(data, dst) != n {
-			panic(errors.New("内置 copy() 函数失败"))
-		}
+		// 原地异或解密，避免内存重复分配
+		ezr._stream.XORKeyStream(data[:n], data[:n])
 	}
 	return n, err
 }
@@ -758,11 +761,17 @@ func work() {
 		// Get the Argon2 salt and XChaCha20 nonce from input volume
 		salt := make([]byte, 16)
 		nonce := make([]byte, 24)
-		if n, err := fin.Read(salt); err != nil || n != 16 {
-			panic(errors.New("从文件读取 16 字节失败"))
+		if _, err := io.ReadFull(fin, salt); err != nil {
+			os.Remove(inputFile)
+			inputFile = strings.TrimSuffix(inputFile, ".tmp")
+			broken(fin, fout, "输入文件过小或已损坏（无法读取盐值）", true)
+			return
 		}
-		if n, err := fin.Read(nonce); err != nil || n != 24 {
-			panic(errors.New("从文件读取 24 字节失败"))
+		if _, err := io.ReadFull(fin, nonce); err != nil {
+			os.Remove(inputFile)
+			inputFile = strings.TrimSuffix(inputFile, ".tmp")
+			broken(fin, fout, "输入文件过小或已损坏（无法读取随机数）", true)
+			return
 		}
 
 		// Generate key and decrypt the entire volume
@@ -1027,17 +1036,9 @@ func work() {
 
 	defer func() {
 		// Securely wipe sensitive keys from RAM
-		for i := range key {
-			key[i] = 0
-		}
-		for i := range nonce {
-			nonce[i] = 0
-		}
-		if keyfileKey != nil {
-			for i := range keyfileKey {
-				keyfileKey[i] = 0
-			}
-		}
+		zeroBytes(key)
+		zeroBytes(nonce)
+		zeroBytes(keyfileKey)
 	}()
 
 	if mode == "encrypt" {
@@ -1681,7 +1682,14 @@ func unpackArchive(zipPath string) error {
 
 	var totalSize int64
 	for _, f := range reader.File {
+		// 防御 Zip Bomb：单项解压大小或总大小限制（上限 2TiB）
+		if f.UncompressedSize64 > 2*uint64(TiB) {
+			return errors.New("压缩包解压总大小超出安全上限")
+		}
 		totalSize += int64(f.UncompressedSize64)
+	}
+	if totalSize < 0 || totalSize > 2*int64(TiB) {
+		return errors.New("压缩包解压总大小异常或超出安全上限")
 	}
 
 	extractDir := filepath.Dir(zipPath)
